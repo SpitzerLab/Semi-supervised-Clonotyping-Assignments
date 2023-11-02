@@ -1,0 +1,247 @@
+---
+title: "Semi-automated clonotyping assignments"
+author: "Rachel DeBarge, Matthew Spitzer"
+date: "5/14/2020"
+output: html_document
+---
+This script is used to take fcs files stained with the CyTOF clonotyping panel and determine which Va and Vb chain, and subsequently what clonotype, each cell in the file is positive for. This script will arcsinh transform the data, and use a positive staining threshold between 1-2 depending on individual antibody staining to determine which chain each cell is positive for. This script could be adapted to automatically assign cells as positive in certain markers, especially markers that should be mutually exclusive. 
+
+#Load necessary packages
+```{r}
+library(flowCore)
+library(tidyr)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+```
+
+
+#Define threshold values
+
+This function will make a matrix with each gene and respective threshold value
+Default threshold = 2, can override as necessary (see next function)
+Input: names for the columns in the vector to be created (in this case, the Va/Vb chain names), and the arcsinh transformed threshold for the script to call positives for each chain
+Output: vector with each Va/Vb chain and the cutoff positive threshold
+```{r}
+create_threshold_matrix <- function(col.names, threshold.default) {
+  threshold.matrix <- as.data.frame(mat.or.vec(length(col.names), 2)) 
+  colnames(threshold.matrix) <- c("Marker", "Threshold")
+  threshold.matrix[,1] <- col.names 
+  threshold.matrix[,2] <- threshold.default
+  return(threshold.matrix)
+}
+```
+
+#Override threshold values
+
+If notice that staining is variable between Va/Vb chains, can manually define individual threshold values in threshold matrix as needed
+Input: name of the column to be changed in the matrix (a single Va or Vb), and the new threshold to replace for that chain
+Output: overwrite of the vector created in create_threshold_matrix with the changed single threshold value
+```{r}
+override_threshold_default <- function(col.name, threshold.custom) {
+  threshold.matrix[which(threshold.matrix$Marker == col.name), 2] <- threshold.custom 
+  return(threshold.matrix)
+}
+```
+
+#Read in fcs file 
+
+(should be pre-gated on population of interest ie Live, CD8+ T cells)
+Input: fcs file
+Output: arcsinh transformed dataframe
+```{r}
+read.fcs.file <- function(filename) {
+  file.df.temp <- read.FCS(filename)
+  file.df <- as.data.frame(file.df.temp@exprs)
+  colnames(file.df) <- file.df.temp@parameters@data$desc
+  file.df <- asinh(file.df/5) 
+  return(file.df)
+}
+```
+
+#Create columns in df for Va and Vb values to be assigned
+
+Input: the fcs file to be analyzed (now a data frame), and vector defining the names of the new columns (in this case, Va and Vb)
+Output: the same df with two new empty columns labeled per input vector
+```{r}
+create_new_columns <- function(file.df, new.columns) {
+  new.column <- as.data.frame(mat.or.vec(nrow(file.df), length(new.columns)))
+  colnames(new.column) <- new.columns
+  file.df <- cbind(file.df, new.column)
+  return(file.df)
+}
+```
+
+#Define Va and Vb values
+
+In the df, iterate through each event to see if any pass the positive threshold, define each event as TRUE or FALSE for each Va and Vb, count TRUEs and FALSEs for each event, and input into Va and Vb columns. This will be either the Va and Vb that passed the threshold, "None" (did not meet threshold), or "Unassigned" (met threshold for >1 Va or Vb).
+Input: threshold matrix (cutoff for each Va and Vb), df, and input of column names (parameters in df) to iterate through
+Output: df with Va and Vb columns filled in with assignments
+```{r}
+Define_positive_markers <- function(threshold.matrix, file.df, col.names) {
+  for (i in 1:nrow(file.df)) {
+    cell <- file.df[i, col.names] 
+    cell.threshold <- cell>threshold.matrix[,2]
+    Va_indices <- cell.threshold[,Va_chains]
+    Vb_indices <- cell.threshold[,Vb_chains]
+    num.pos.Va <- sum(Va_indices, na.rm = TRUE)
+    num.pos.Vb <- sum(Vb_indices, na.rm = TRUE)
+    if (num.pos.Va == 1) { 
+      file.df[i, "Va"] = rownames(as.data.frame(Va_indices))[which(Va_indices==TRUE)]
+    } else if (num.pos.Va == 0) {
+      file.df[i, "Va"] = "None"
+    } else {
+      file.df[i, "Va"] = "Unassigned"
+    }
+    if (num.pos.Vb == 1) { 
+      file.df[i, "Vb"] = rownames(as.data.frame(Vb_indices))[which(Vb_indices==TRUE)]
+    } else if (num.pos.Vb == 0) {
+      file.df[i, "Vb"] = "None"
+    } else {
+      file.df[i, "Vb"] = "Unassigned"
+    }
+  }
+  return(file.df)
+}
+```
+
+#Put it all together
+
+Define variables to be used in the script, make sure these names match the parameters in the fcs
+```{r}
+Va_chains = c("Va_2", "Va_3.2", "Va_8.3", "Va_11.1.2")
+Vb_chains = c("Vb_2", "Vb_3", "Vb_4", "Vb_5.1", "Vb_6", "Vb_7", "Vb_8.1", "Vb_8.3", "Vb_9", "Vb_10b","Vb_11", "Vb_12", "Vb_13", "Vb_14", "Vb_17")
+col.names = c(Va_chains, Vb_chains)
+```
+
+#Iterate through cells if necessary and find Va and Vb thresholds. Use override_threshold_default as necessary.
+Use first function for a uniform threshold for all Va's and Vb's. Use second function for individual manual overrides.
+```{r}
+threshold.matrix <- create_threshold_matrix(col.names, threshold.default = 1.5)
+#threshold.matrix <- override_threshold_default(col.name = "Vb_11", threshold.custom = 2)
+```
+
+Master function that creates a list of fcs files to create assignments for each file from a wd and writes a csv for each fcs in the directory
+Note: If this fucntion gives an error 'undefined columns selected' check and make sure the Va/Vb chain names are noted the same way in the col.names matrix as the fcs file (ie dashes,periods,etc)
+```{r}
+wd = "/directory/with/fcsfiles/..."
+Create_clonotype_assignments <- function(threshold.matrix, file.df, col.names, wd) {
+  setwd(wd)
+  FCSfiles <- list.files(pattern = "*.fcs$")
+  for (f in FCSfiles) {
+    print(paste("Reading in:", f))
+    file.df <- read.fcs.file(f)
+    create_new_columns(file.df, new.columns = c("Va", "Vb"))
+    file.df.assignments <- Define_positive_markers(threshold.matrix, file.df, col.names)
+    file.df.assignments$Clonotype = paste(file.df.assignments$Va, file.df.assignments$Vb, sep="_")
+    write.csv(file.df.assignments, paste(f, "assigned.csv", sep = "_"), row.names = FALSE)
+  }
+  print("Successfully assigned clonotypes")
+}
+
+Create_clonotype_assignments(threshold.matrix, file.df, col.names, wd) 
+```
+
+#QC: Creates scatter plot to check accuracy of Va/Vb assignments and if thresholds should be altered.
+Input: csv files in wd written for each fcs file from the Create_clonotype_assignments function
+Output: master df of all files and scatter plot of individual cells with different threshold lines to determine correct cutoff
+
+After checking assignments, AllCells.df can now be used for downstream analysis
+```{r}
+wd = "/directory/with/fcsfiles/..."
+Make.df <- function(wd) {
+  setwd(wd)
+  CSVfiles <- list.files(pattern = "*.csv$") 
+  DFlist = list() 
+  print("Concatenating All Files")
+  setwd(wd)
+  for (f in CSVfiles) {
+    print(paste("Reading in:", f))
+    stringsAsFactors = FALSE
+    csv.file <- read.csv(f)
+    temp.tab <- as.data.frame(csv.file)
+    temp.tab$filename <- f
+    DFlist[[f]] <- temp.tab
+  }
+  print("Files Successfully Concatenated")
+  AllCells.df <- bind_rows(DFlist)
+  
+}
+
+AllCells.df<-Make.df(wd)
+
+#subsample to make plot rendering faster
+AllCells_sub_df <- AllCells.df[sample(nrow(AllCells.df), size=10000), ]
+VaColors <- c("Unassigned" = "#777B7E",
+              "None" =       "grey",
+              "Va_2" =       "#DD5129",
+              "Va_3.2" =     "#0F7BA2",
+              "Va_8.3" =     "#43B284",
+              "Va_11.1.2" =  "#FAB255")
+
+VbColors <- c("Unassigned" = "#777B7E",
+                    "None" = "grey",
+                      "Vb_2"="#DF9ED4", 
+                      "Vb_3"="#438B7D",
+                      "Vb_4"="#CF5A79",
+                    "Vb_5.1"="#3C5096",
+                      "Vb_6"="#D77B5A",
+                      "Vb_7"="#98B46C",
+                    "Vb_8.1"="#734399",
+                    "Vb_8.3"="#E2AD5F",
+                      "Vb_9"="#D77CA6",
+                    "Vb_10b"="#406E89",
+                     "Vb_11"="#5DA373",
+                     "Vb_12"="#924099",
+                     "Vb_13"="#D2C564",
+                     "Vb_14"="#CB4955",
+                     "Vb_17"="#9a6324")
+
+for (f in Va_chains){
+ Va.plot <-  ggplot(data = AllCells_sub_df, aes(x = AllCells_sub_df[,f], y = CD45, color = Va)) + 
+  geom_point(size = 0.5) +
+  scale_color_manual(values = VaColors) +
+  geom_hline(yintercept=1, linetype="dashed", color = "red") +
+  geom_vline(xintercept=1, linetype="dashed", color = "red") +
+  geom_hline(yintercept=1.5, linetype="dashed", color = "green") +
+  geom_vline(xintercept=1.5, linetype="dashed", color = "green") +
+  geom_hline(yintercept=2, linetype="dashed", color = "blue") +
+  geom_vline(xintercept=2, linetype="dashed", color = "blue") +
+  guides(colour = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  labs(y = "CD45",x=f)
+  
+  print(Va.plot)
+}
+
+for (f in Vb_chains){
+ Vb.plot <- ggplot(data = AllCells_sub_df, aes(x = AllCells_sub_df[,f], y = CD45, color = Vb)) + 
+  geom_point(size = 0.5) +
+  scale_color_manual(values = VbColors) +
+  geom_hline(yintercept=1, linetype="dashed", color = "red") +
+  geom_vline(xintercept=1, linetype="dashed", color = "red") +
+  geom_hline(yintercept=1.5, linetype="dashed", color = "green") +
+  geom_vline(xintercept=1.5, linetype="dashed", color = "green") +
+  geom_hline(yintercept=2, linetype="dashed", color = "blue") +
+  geom_vline(xintercept=2, linetype="dashed", color = "blue") +
+  guides(colour = guide_legend(override.aes = list(size=5))) +
+  theme_bw() +
+  labs(y = "CD45",x=f)
+  
+  print(Vb.plot)
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
