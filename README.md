@@ -1,0 +1,2 @@
+# Semi-supervised-Clonotyping-Assignments
+This script is used to take fcs files stained with the CyTOF clonotyping panel and determine which Va and Vb chain, and subsequently what clonotype, each cell in the file is positive for. This script will arcsinh transform the data, and use a positive staining threshold between 1-2 depending on individual antibody staining to determine which chain each cell is positive for. This script could be adapted to automatically assign cells as positive in certain markers, especially markers that should be mutually exclusive. 
